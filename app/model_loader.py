@@ -27,7 +27,7 @@ def load_model():
   model = tf.keras.Sequential([
     efn.EfficientNetB2(
         input_shape=(256, 256, 3),
-        weights='imagenet',
+        weights=None,
         include_top=False
     ),
     L.GlobalAveragePooling2D(),

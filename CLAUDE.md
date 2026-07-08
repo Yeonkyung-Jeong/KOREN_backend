@@ -17,10 +17,10 @@ pip install -r requirements.txt
 pip install fastapi uvicorn sqlalchemy openai dotenv psycopg2
 ```
 
-Using a venv (Windows):
+Using a venv (Windows). `requirements.txt` is pinned for Python 3.11 on Windows (see README), so create the venv with 3.11 specifically:
 ```
-python -m venv venv
-.venv\Scripts\activate
+py -3.11 -m venv venv
+venv\Scripts\activate
 pip install -r requirements.txt
 pip install fastapi uvicorn sqlalchemy openai dotenv psycopg2
 ```
