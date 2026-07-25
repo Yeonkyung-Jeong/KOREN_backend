@@ -1,6 +1,7 @@
 # 연합학습 기반 의료 진단 AI 플랫폼
 ## K-디지털 챌린지: NET 챌린지 캠프 공모전 (25.07.08 - 25.11.07)
 ### 👥 프론트엔드 1명, 백엔드 1명, AI 1명, 인프라 1명
+<br> </br>
 ### 프로젝트 개요
 **군·면 지역 보건소 및 중소병원의 진단 역량 향상과 지역 간 의료 격차 해소를 목표**로 하는 온디바이스 AI 진단 플랫폼입니다.
 
@@ -18,7 +19,7 @@
 
 <br> </br>
 
-**역할**
+### 역할
 
 - 연합학습 ↔ 로컬 진단 파이프라인 설계
 - FastAPI 기반 백엔드 API 및 서버 개발
@@ -27,7 +28,7 @@
 
 <br> </br>
 
-**사용 기술**
+### 사용 기술
 
 <aside>
 
@@ -37,7 +38,7 @@
 
 <br> </br>
 
-**시스템 아키텍처**
+### 시스템 아키텍처
 
 <img width="1144" height="689" alt="image" src="https://github.com/user-attachments/assets/c37bb5ed-4d57-4f63-ac0c-f913877fcffb" />
 - KOREN 고속망 안에 Openstack VM을 만들고, 그 위에 K-PaaS 관리 기반 도커 컨테이너들로 구성했습니다. 해당 도커 컨테이너는 병원 노드를 의미하며, React + FastAPI + PostgreSQL로 진단플랫폼을 구현하였음을 표현했습니다.
@@ -46,7 +47,7 @@
 
 <br> </br>
 
-**사용 모델 및 연합학습 결과**
+### 사용 모델 및 연합학습 결과
 <img width="1508" height="557" alt="image" src="https://github.com/user-attachments/assets/d1d82098-6081-43e6-8e43-653475e5eb19" />
 <img width="1561" height="641" alt="image" src="https://github.com/user-attachments/assets/f0cc13b1-7d20-44c2-be69-be7c550047ee" />
 
