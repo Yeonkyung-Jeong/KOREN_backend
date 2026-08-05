@@ -9,8 +9,6 @@
 
 중앙 서버에서 집계된 글로벌 모델을 다시 각 노드에 배포하는 구조로 설계되었습니다.
 
-‘AI 진단 결과 0.5초 이내 반환’을 목표로 백엔드를 개발했습니다
-
 <img width="1514" height="733" alt="image" src="https://github.com/user-attachments/assets/f7da8afa-0af7-439a-90a3-fd4e698998a8" />
 
 <img width="1446" height="790" alt="image" src="https://github.com/user-attachments/assets/e71593e2-3a86-4565-ac13-c7f9e7c7fe4f" />
