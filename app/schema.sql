@@ -47,3 +47,16 @@ CREATE TABLE diagnoses (
                            ai_description TEXT,
                            diagnosed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- PGVECTOR (docs/prd-patient-history-assistant.md §7)
+CREATE EXTENSION IF NOT EXISTS vector;
+
+ALTER TABLE diagnoses
+  ADD COLUMN diagnosis_detail   VARCHAR(64),      -- ISIC mock 세부 라벨 (melanoma/nevus/unknown 등). 필터링에는 미사용, 인용/서술 참고용
+  ADD COLUMN embedding          vector(1536),      -- OpenAI text-embedding-3-small 기준
+  ADD COLUMN embedding_source   TEXT,              -- 임베딩 생성에 사용한 원문(디버깅/재임베딩용)
+  ADD COLUMN embedding_updated_at TIMESTAMP;
+
+-- 코사인 유사도 기준 ANN 인덱스 (pgvector 0.5+ 가정)
+CREATE INDEX diagnoses_embedding_hnsw_idx
+  ON diagnoses USING hnsw (embedding vector_cosine_ops);
