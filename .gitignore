@@ -29,3 +29,6 @@ build/
 
 # 입력 이미지 파일
 uploads
+
+# Claude Code hook 로그 (prompt/tool 실행 기록, 프로젝트 로컬)
+logs/
