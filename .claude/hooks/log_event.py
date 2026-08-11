@@ -68,17 +68,37 @@ def build_record(event_type: str, payload: dict) -> dict:
     return record
 
 
+def append_record(log_path: str, record: dict) -> None:
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
     event_type = sys.argv[1] if len(sys.argv) > 1 else "unknown"
-    payload = read_payload()
-    record = build_record(event_type, payload)
 
     log_dir = os.path.join(project_root(), "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "claude_hooks.jsonl")
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # 정상 경로에서 실패하더라도(페이로드 파싱, 직렬화, 파일 쓰기 등) 로그 한 줄이
+    # 흔적도 없이 사라지지 않도록, 실패 원인을 담은 최소 레코드를 남긴다.
+    # 세션을 절대 깨면 안 되므로 이 fallback 자체의 실패는 여전히 완전히 삼킨다.
+    session_id = None
+    try:
+        payload = read_payload()
+        session_id = payload.get("session_id")
+        record = build_record(event_type, payload)
+        append_record(log_path, record)
+    except Exception as e:
+        try:
+            append_record(log_path, {
+                "timestamp": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "event_type": event_type,
+                "session_id": session_id,
+                "log_error": f"{type(e).__name__}: {e}",
+            })
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
