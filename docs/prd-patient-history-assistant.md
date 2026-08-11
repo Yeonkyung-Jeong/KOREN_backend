@@ -37,7 +37,7 @@ KOREN 백엔드는 현재 병변 이미지 1장을 업로드하면 EfficientNetB
 - **에러 컨벤션**: 환자 미존재 시 `HTTPException(status_code=404, detail="Patient not found")`, 그 외 예외는 최상위에서 잡아 `HTTPException(status_code=500, detail=str(e))`로 감싼다. 새 엔드포인트도 동일한 패턴을 따른다.
 - **응답 컨벤션**: `JSONResponse(content={...})` 또는 dict를 그대로 반환(FastAPI가 자동 직렬화)하며, Pydantic `response_model`은 `/summarize`에서만 느슨하게 사용된다. 새 엔드포인트는 응답 스키마가 3종으로 분기되므로 Pydantic `Union` 모델을 명시적으로 정의해 타입 안정성을 확보한다 (§6).
 - **DB 세션**: `Depends(get_db)`로 `SessionLocal`을 주입받는 동기 SQLAlchemy 세션. `echo=True`로 모든 SQL이 로깅된다 — 벡터 컬럼 값(1536차원 float 배열)이 로그에 그대로 찍히면 로그가 매우 커지므로 §11에 언급.
-- **`Diagnosis` ↔ `CommunicationSummary` 관계**: `Diagnosis.communication_summary_id` FK가 스키마에 존재하지만 어디서도 채워지지 않는다(`routers.py`의 기존 TODO). 현재는 `patient_id`와 타임스탬프 근접성으로만 둘을 상관관계 지을 수 있다. 브리핑 기능의 `narrative_summary` 생성도 이 제약을 그대로 물려받는다 — FK 조인이 아니라 `patient_id` + 시간 순서 기반으로 처방/환자 반응 텍스트를 진단 타임라인에 매칭한다.
+- **`Diagnosis` ↔ `CommunicationSummary` 관계**: `communication_summaries`는 진단 1건당 row 1개(카테고리 4개는 컬럼: `의사소견`/`처방`/`환자우려점`/`진료계획`)로 설계되어 있고, `communication_summaries.diagnosis_id`(NOT NULL FK) → `diagnoses.id`로 직접 연결된다. `POST /summarize`가 이 FK와 `Diagnosis.communication_summary_id`(캐시 컬럼)를 같은 트랜잭션에서 채운다. 브리핑 기능의 `narrative_summary` 생성도 시간 근접성 추정 없이 `diagnosis_id` 조인만으로 처방/환자 반응 텍스트를 진단 타임라인에 매칭한다.
 - **`DiagnosisEnum`**: 현재 `benign` / `malignant` 2종뿐이다. 설계 확정사항 5번("diagnosis 세부 라벨, unknown 다수")은 SIIM-ISIC 원본 데이터셋의 `diagnosis` 컬럼(melanoma, nevus, seborrheic_keratosis, unknown 등 세분류)을 가리키는 것으로 판단된다 — 이 세부 라벨은 현재 스키마에 없으므로 §7에서 `diagnosis_detail` 컬럼 신설을 제안한다.
 - **모델/전처리**: `model_loader.py`, `utils.py`는 이번 기능과 직접 관련 없다(이미지 분류 파이프라인은 그대로 유지). 챗봇은 기존 `diagnoses` 테이블에 이미 저장된 결과를 검색 대상으로 삼는다.
 
@@ -202,14 +202,14 @@ CREATE INDEX diagnoses_embedding_hnsw_idx
 
 ```
 "{anatomy_site} 부위, {diagnosis}({diagnosis_detail}) 소견, confidence {confidence_score:.2f}. "
-"처방: {communication_summary.처방}. 환자 반응: {communication_summary.환자의 우려점}."
+"처방: {communication_summary.처방}. 환자 반응: {communication_summary.환자우려점}."
 ```
-`communication_summary`는 FK가 아니라 같은 `patient_id`에서 `diagnosed_at`과 가장 가까운 `summary_created_at`을 가진 레코드를 조인해 채운다(§3에서 언급한 기존 제약과 동일한 방식).
+`communication_summary`는 `diagnosis_id` FK로 `diagnoses`와 직접 조인해 채운다(§3) — 시간 근접성 매칭은 필요하지 않다. 연결된 요약이 없는 진단(아직 `/summarize`가 호출되지 않은 경우)은 처방/환자 반응 부분을 공란으로 둔다.
 
 ### 7.3 임베딩 생성 시점
 
 - **신규 진단 생성 시**: `POST /diagnose`에서 `Diagnosis` row를 커밋한 직후, 위 원문을 조합해 OpenAI 임베딩 API를 동기 호출하고 `embedding`/`embedding_source`/`embedding_updated_at`을 채운다. (해당 시점엔 아직 대화 요약이 없을 수 있으므로 처방/반응 부분은 공란으로 시작)
-- **대화 요약 생성 시**: `POST /summarize`에서 요약이 저장된 후, 가장 최근 관련 `Diagnosis`를 재임베딩해 처방/반응 텍스트를 반영한다.
+- **대화 요약 생성 시**: `POST /summarize`가 요약을 연결한 `Diagnosis`(해당 환자의 최신 진단, `diagnosis_id` FK로 확정적으로 연결됨)를 재임베딩해 처방/반응 텍스트를 반영한다.
 - **초기 시드**: `scripts/embed_diagnoses.py` 배치 스크립트로 mock 데이터 전체를 일괄 임베딩(§8).
 
 ### 7.4 필터링 원칙 (기존 프로젝트 확정 원칙 재사용)
@@ -229,15 +229,16 @@ LIMIT :top_k;
 
 ## 8. `communication_summaries` 목데이터 설계 방향
 
-포트폴리오 데모용으로 ISIC mock 진단 데이터(§7에서 seed할 `diagnoses`)마다 4개 카테고리(`의사 소견`, `환자의 우려점`, `진료 계획`, `처방`)를 템플릿 기반으로 생성한다.
+`communication_summaries`는 진단 1건당 row 1개, 카테고리 4개(`의사소견`, `처방`, `환자우려점`, `진료계획`)는 컬럼으로 분리되어 있다(§3). 포트폴리오 데모용으로 ISIC mock 진단 데이터(§7에서 seed할 `diagnoses`)마다 이 4개 컬럼을 템플릿 기반으로 채운다.
 
-- **소스 스크립트**: `scripts/seed_mock_summaries.py` — `diagnosis`(benign/malignant)와 `anatomy_site`별로 문구 풀(pool)을 두고 조합해 자연스러운 변형을 만든다.
+- **소스 스크립트**: `scripts/seed_mock_summaries.py` — `diagnosis`(benign/malignant)와 `anatomy_site`별로 문구 풀(pool)을 두고 조합해 자연스러운 변형을 만들고, 생성한 row의 `id`를 `diagnoses.communication_summary_id`에 즉시 연결한다(시간 근접성 추정이 아니라 확정적 FK 연결).
 - **타임스탬프**: `summary_created_at`은 대응하는 `diagnosed_at`에서 0~3일 이내로 설정해, 브리핑의 방문 주기 계산이 자연스럽게 맞물리게 한다.
 - **`처방` 예시 문구 풀**:
   - benign: `"경과 관찰 권장, 별도 처방 없음"`, `"보습제 처방, 4주 후 재방문 권장"`
   - malignant: `"조직검사 의뢰, 2차 병원 전원 안내"`, `"절제술 일정 협의, 스테로이드 연고 병행 처방"`
-- **`환자의 우려점` 예시 문구 풀**: `"환부 크기 변화에 대한 불안 호소"`, `"가려움 및 색 변화 보고"`, `"특이 증상 없음, 정기 검진 목적"`
-- **`진료 계획`**: 방문 간격과 연동 — 직전 방문에서 malignant였던 경우 다음 방문 계획을 더 짧게(예: `"3개월 후 재검"`) 생성해 브리핑의 `recommendation` 로직과 일관성을 유지한다.
+- **`환자우려점` 예시 문구 풀**: `"환부 크기 변화에 대한 불안 호소"`, `"가려움 및 색 변화 보고"`, `"특이 증상 없음, 정기 검진 목적"`
+- **`의사소견` 문구 풀**: `diagnosis`(benign/malignant) × `anatomy_site` 조합별로 직접 설계(예: `"{부위} 부위 병변, 양성 소견으로 판단됨. 경계 명확하고 비대칭성 낮음."`, `"{부위} 부위 병변, 악성 의심 소견. 비대칭성 및 경계 불규칙성 관찰됨, 조직검사 필요."`) — 처방/환자우려점 풀과 톤을 맞춘다.
+- **`진료계획`**: 방문 간격과 연동 — 직전 방문에서 malignant였던 경우 다음 방문 계획을 더 짧게(예: `"3개월 후 재검"`) 생성해 브리핑의 `recommendation` 로직과 일관성을 유지한다.
 - 실제 문구 다양성보다 **카테고리별 텍스트가 임베딩·narrative_summary 생성에 쓸 만큼 구체적인지**가 중요하다 — 지나치게 짧은 placeholder는 벡터 검색 품질을 떨어뜨린다.
 
 ## 9. LangGraph 에이전트 아키텍처
@@ -302,8 +303,8 @@ pgvector
 
 - **인증 부재**: 현재 코드베이스 전체에 인증 미들웨어가 없다. `/chat` 엔드포인트는 환자의 전체 진단 이력과 대화 요약을 대화형으로 노출하므로, 다른 엔드포인트보다 민감도가 높다. 이 PRD는 기존 컨벤션(무인증)을 그대로 따르되, 실제 배포 전 별도 인가 계층 도입을 후속 과제로 남긴다.
 - **SQL 로그 노출**: `app/database.py`의 `engine`이 `echo=True`로 설정되어 있어 1536차원 임베딩 벡터가 INSERT/UPDATE 시 로그에 그대로 출력된다. 로그 볼륨/가독성 문제가 있으므로 이 테이블에 한해 로깅 레벨 조정을 고려해야 한다.
-- **`communication_summary_id` 미연결**: 기존 TODO가 그대로 남아있는 채로 이 기능을 얹기 때문에, 진단-요약 매칭 로직(시간 근접성 기반)이 두 곳(브리핑 narrative, 임베딩 원문 구성)에서 중복 구현될 소지가 있다 — 공통 헬퍼 함수로 추출 권장.
+- **`communication_summary_id` 미연결** (해결됨): `communication_summaries`를 진단 1건당 row 1개 구조로 재설계하고 `diagnosis_id` FK를 NOT NULL로 두면서, `POST /summarize`가 대상 `Diagnosis`의 `communication_summary_id`를 확정적으로 채우도록 변경했다. 브리핑 narrative, 임베딩 원문 구성 모두 이제 `diagnosis_id` 조인 하나로 처리되어 매칭 로직 중복 문제가 해소됐다.
 - **pgvector 인덱스 방식**: HNSW는 pgvector 0.5.0 이상에서만 지원된다. 배포 환경의 pgvector 버전을 사전에 확인하고, 미지원 시 `ivfflat`으로 대체해야 한다.
 - **임베딩 재생성 비용**: 대화 요약이 추가될 때마다 관련 `Diagnosis`를 재임베딩하는 구조라, 요약이 잦은 환자는 OpenAI 임베딩 호출이 누적된다. 데모 규모에서는 무시 가능한 수준이나 확장 시 배치화 검토 필요.
 - **`diagnosis_detail` 컬럼의 데이터 출처**: 이 문서에서 신설을 제안한 컬럼이며, 현재 `DiagnosisEnum`에는 대응 값이 없다. ISIC mock 시드 스크립트가 유일한 데이터 소스가 되므로, 실제 모델(`model_loader.py`)이 세분류를 예측하지 않는 한 이 필드는 시연용 mock 데이터에서만 채워진다는 점을 명확히 인지해야 한다.
-- **임베딩 재생성 타이밍의 매칭 오류 위험**: §3에서 지적한 대로 `communication_summary_id` FK가 비어있어 진단과 대화 요약을 시간 근접성으로만 추정 매칭한다. §7.3의 "`POST /summarize` 호출 시 가장 최근 관련 `Diagnosis`를 재임베딩" 로직은, 재진 환자가 짧은 간격(예: 며칠 내)으로 여러 번 방문할 경우 "가장 최근" 진단이 실제로는 이번 대화와 무관한 다른 진단 건을 가리킬 수 있다는 구조적 결함을 가진다 — 이 경우 잘못된 처방/반응 텍스트가 엉뚱한 진단 건의 임베딩에 섞여 들어가 유사 사례 검색 품질을 오염시킬 위험이 있다. 데모 규모(방문 빈도 낮음)에서는 영향이 제한적이지만, FK를 실제로 채우는 마이그레이션 없이는 구조적으로 해소되지 않으므로 후속 과제로 남긴다.
+- **임베딩 재생성 타이밍의 매칭 오류 위험** (해결됨): `communication_summaries.diagnosis_id` FK로 진단-요약이 확정적으로 연결되면서, 재진 환자가 짧은 간격으로 여러 번 방문해도 "가장 최근 진단"이 엉뚱한 진단 건을 가리키는 문제 자체가 발생하지 않는다. `POST /summarize`가 항상 명시적으로 지정된 `Diagnosis`(해당 환자의 최신 진단)에만 요약을 연결·재임베딩한다.
