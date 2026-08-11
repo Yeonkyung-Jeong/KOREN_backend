@@ -25,12 +25,16 @@ CREATE TABLE medical_images (
 );
 
 -- COMMUNICATION_SUMMARIES
+-- 진단 1건당 row 1개(카테고리별 row 아님). diagnosis_id FK는 diagnoses 테이블 생성 후
+-- 별도 ALTER TABLE로 추가한다(diagnoses.communication_summary_id와의 순환 참조 회피).
 CREATE TABLE communication_summaries (
                                          id SERIAL PRIMARY KEY,
-                                         patient_id INT NOT NULL REFERENCES patients(id),
+                                         diagnosis_id INTEGER NOT NULL UNIQUE,
                                          summary_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                                         category TEXT,
-                                         content TEXT
+                                         의사소견 TEXT,
+                                         처방 TEXT,
+                                         환자우려점 TEXT,
+                                         진료계획 TEXT
 );
 
 -- DIAGNOSES
@@ -47,6 +51,10 @@ CREATE TABLE diagnoses (
                            ai_description TEXT,
                            diagnosed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE communication_summaries
+  ADD CONSTRAINT communication_summaries_diagnosis_id_fkey
+  FOREIGN KEY (diagnosis_id) REFERENCES diagnoses(id) ON DELETE CASCADE;
 
 -- PGVECTOR (docs/prd-patient-history-assistant.md §7)
 CREATE EXTENSION IF NOT EXISTS vector;
