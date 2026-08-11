@@ -247,12 +247,16 @@ def get_latest_summary(patient_id: str, db: Session = Depends(get_db)):
   if not patient:
     raise HTTPException(status_code=404, detail="Patient not found")
 
-  # 최신 진단에 연결된 CommunicationSummary 1건 조회 (patient의 진단들 중 summary_created_at 최신)
-  latest = db.query(models.CommunicationSummary) \
-    .join(models.Diagnosis, models.CommunicationSummary.diagnosis_id == models.Diagnosis.id) \
+  # 환자의 최신 진단(diagnosed_at 기준) 1건에 연결된 요약을 반환한다.
+  # summary_created_at이 아니라 diagnosed_at 기준으로 "최신 진단"을 정하므로,
+  # 최신 진단에 아직 요약이 없으면(아직 /summarize가 호출되지 않음) 이전 진단의
+  # 오래된 요약으로 조용히 대체되지 않고 404를 반환한다.
+  latest_diagnosis = db.query(models.Diagnosis) \
     .filter(models.Diagnosis.patient_id == patient.id) \
-    .order_by(models.CommunicationSummary.summary_created_at.desc(), models.CommunicationSummary.id.desc()) \
+    .order_by(models.Diagnosis.diagnosed_at.desc(), models.Diagnosis.id.desc()) \
     .first()
+
+  latest = latest_diagnosis.communication_summary if latest_diagnosis else None
 
   if not latest:
     raise HTTPException(status_code=404, detail="No communication summary found for this patient")
