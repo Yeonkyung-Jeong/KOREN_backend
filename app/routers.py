@@ -10,6 +10,7 @@ import os, uuid, json, ast
 from app.database import get_db
 from app import models
 from app.utils import preprocess_image
+from app.summary_mapping import KOR_SUMMARY_KEY_TO_COLUMN, COLUMN_TO_KOR_SUMMARY_KEY
 
 router = APIRouter()
 
@@ -90,14 +91,17 @@ async def diagnose(
     db.commit()
     db.refresh(diagnosis)
 
-    # 이전 대화 요약 불러오기
-    previous_summaries = db.query(models.CommunicationSummary) \
-      .filter(models.CommunicationSummary.patient_id == patient.id) \
+    # 이전 대화 요약 불러오기 (해당 환자의 과거 진단에 연결된 가장 최근 요약 1건)
+    latest_summary = db.query(models.CommunicationSummary) \
+      .join(models.Diagnosis, models.CommunicationSummary.diagnosis_id == models.Diagnosis.id) \
+      .filter(models.Diagnosis.patient_id == patient.id) \
       .order_by(models.CommunicationSummary.summary_created_at.desc(),
-                models.CommunicationSummary.id.asc()) \
-      .limit(4) \
-      .all()
-    previous_summary_data = {s.category: s.content for s in previous_summaries}
+                models.CommunicationSummary.id.desc()) \
+      .first()
+    previous_summary_data = (
+        {COLUMN_TO_KOR_SUMMARY_KEY[col]: getattr(latest_summary, col) for col in KOR_SUMMARY_KEY_TO_COLUMN.values()}
+        if latest_summary else {}
+    )
 
     return JSONResponse(content={
       "diagnosis": diagnosis_result,
@@ -147,6 +151,14 @@ def create_summary(input_data: ConversationInput, db: Session = Depends(get_db))
     if not patient:
       raise HTTPException(status_code=404, detail="Patient not found")
 
+    # 요약을 연결할 대상 진단: 해당 환자의 가장 최근 진단 1건
+    target_diagnosis = db.query(models.Diagnosis) \
+      .filter(models.Diagnosis.patient_id == patient.id) \
+      .order_by(models.Diagnosis.diagnosed_at.desc(), models.Diagnosis.id.desc()) \
+      .first()
+    if not target_diagnosis:
+      raise HTTPException(status_code=404, detail="No diagnosis found for this patient")
+
     # conversation 전처리: 빈 문자열 체크, 줄바꿈 제거
     conversation = (input_data.conversation or "").strip().replace("\n", " ").replace("\r", "")
     if not conversation:
@@ -184,27 +196,39 @@ def create_summary(input_data: ConversationInput, db: Session = Depends(get_db))
       # LLM 출력이 완전히 올바른 JSON이 아닐 때
       summary_json_kor = ast.literal_eval(summary_text)
 
-    # JSON 키별로 CommunicationSummary에 개별 저장
+    # JSON 키를 컬럼명으로 변환해 대상 진단의 CommunicationSummary 1 row에 UPSERT
+    column_updates = {}
     for category, content in summary_json_kor.items():
+      column = KOR_SUMMARY_KEY_TO_COLUMN.get(category)
+      if column is None:
+        continue  # 4개 컬럼 고정 스키마이므로 예상 밖 키(오탈자 등)는 저장하지 않음
       # content 전처리: 긴 문자열, 특수문자 방어
       content_safe = (content or "").encode('utf-8', errors='replace').decode('utf-8')
-      if not category:
-        category = "unknown"
       if len(content_safe) > 10000:
         content_safe = content_safe[:10000]
+      column_updates[column] = content_safe
 
-      try:
-        db_summary = models.CommunicationSummary(
-            patient_id=patient.id,
+    try:
+      existing = db.query(models.CommunicationSummary) \
+        .filter(models.CommunicationSummary.diagnosis_id == target_diagnosis.id).first()
+      if existing:
+        for col, val in column_updates.items():
+          setattr(existing, col, val)
+        existing.summary_created_at = datetime.utcnow()
+        summary_row = existing
+      else:
+        summary_row = models.CommunicationSummary(
+            diagnosis_id=target_diagnosis.id,
             summary_created_at=datetime.utcnow(),
-            category=category,
-            content=content_safe
+            **column_updates
         )
-        db.add(db_summary)
-        db.commit()
-      except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"DB insert error: {e}")
+        db.add(summary_row)
+      db.flush()  # summary_row.id 확보 (커밋 전)
+      target_diagnosis.communication_summary_id = summary_row.id  # 양방향 FK 동기화
+      db.commit()
+    except Exception as e:
+      db.rollback()
+      raise HTTPException(status_code=500, detail=f"DB insert error: {e}")
 
     return summary_json_kor
 
@@ -223,23 +247,22 @@ def get_latest_summary(patient_id: str, db: Session = Depends(get_db)):
   if not patient:
     raise HTTPException(status_code=404, detail="Patient not found")
 
-  # 최신 CommunicationSummary 4개 조회 (patient_id 기준, summary_created_at 내림차순, id 오름차순)
-  summaries = db.query(models.CommunicationSummary) \
-    .filter(models.CommunicationSummary.patient_id == patient.id) \
-    .order_by(models.CommunicationSummary.summary_created_at.desc(), models.CommunicationSummary.id.asc()) \
-    .limit(4) \
-    .all()
+  # 최신 진단에 연결된 CommunicationSummary 1건 조회 (patient의 진단들 중 summary_created_at 최신)
+  latest = db.query(models.CommunicationSummary) \
+    .join(models.Diagnosis, models.CommunicationSummary.diagnosis_id == models.Diagnosis.id) \
+    .filter(models.Diagnosis.patient_id == patient.id) \
+    .order_by(models.CommunicationSummary.summary_created_at.desc(), models.CommunicationSummary.id.desc()) \
+    .first()
 
-  if not summaries:
+  if not latest:
     raise HTTPException(status_code=404, detail="No communication summary found for this patient")
 
-  summaries = list(reversed(summaries))  # 최신 → 이전 순
-  result = {s.category: s.content for s in summaries}
+  result = {COLUMN_TO_KOR_SUMMARY_KEY[col]: getattr(latest, col) for col in KOR_SUMMARY_KEY_TO_COLUMN.values()}
 
   return {
       "patient_id": patient.patient_id,
       "latest_summary": result,
-      "created_at": [s.summary_created_at for s in summaries]
+      "created_at": latest.summary_created_at
     }
 
 # -----------------------------
