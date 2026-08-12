@@ -7,7 +7,7 @@ from datetime import datetime
 
 sys.path.insert(0, ".")
 
-from openai import OpenAI
+from langchain_openai import OpenAIEmbeddings
 
 from app import models
 from scripts._db import get_session
@@ -45,7 +45,7 @@ def resolve_embedding_text(diagnosis) -> str:
 
 
 def backfill():
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, api_key=os.getenv("OPENAI_API_KEY"))
     session = get_session()
     try:
         diagnoses = session.query(models.Diagnosis).order_by(models.Diagnosis.id.asc()).all()
@@ -65,8 +65,7 @@ def backfill():
                 continue  # 이미 동일한 텍스트로 임베딩됨 (재실행 안전성, 비용 절감)
 
             try:
-                response = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
-                vector = response.data[0].embedding
+                vector = embeddings.embed_query(text)
             except Exception as e:
                 print(f"[embed_diagnoses] diagnosis_id={diagnosis.id} 임베딩 실패, 스킵: {e}")
                 failed += 1
