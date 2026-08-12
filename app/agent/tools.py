@@ -1,0 +1,166 @@
+# app/agent/tools.py
+# retrieve 노드가 llm.bind_tools()로 바인딩하는 유일한 검색 도구.
+# PRD §9.2, §7.4.
+import os
+from functools import lru_cache
+from typing import Literal, Optional
+
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+from langchain_openai import OpenAIEmbeddings
+
+from app import models
+from app.agent.schemas import RetrievePatientHistoryArgs
+
+# scripts/embed_diagnoses.py가 diagnoses.embedding을 채울 때 쓴 모델과 반드시
+# 같아야 한다 — 임베딩 모델이 다르면 벡터 공간이 달라져 코사인 유사도 비교 자체가
+# 무의미해진다.
+EMBEDDING_MODEL = "text-embedding-3-small"
+
+# similar_patients 결과에서 실제 patient_id 대신 노출하는 익명 라벨.
+# top_k가 이 길이를 넘으면 "유사 사례 F", "유사 사례 G" ... 로 이어간다.
+_ANONYMIZED_LABEL_LETTERS = "ABCDEFGHIJ"
+
+
+@lru_cache
+def _get_embeddings() -> OpenAIEmbeddings:
+    # 모듈 임포트 시점이 아니라 최초 호출 시점에 생성한다 — OPENAI_API_KEY가
+    # 없어도(예: 순수 로직만 테스트) 이 모듈을 임포트할 수 있게 하기 위함.
+    return OpenAIEmbeddings(model=EMBEDDING_MODEL, api_key=os.getenv("OPENAI_API_KEY"))
+
+
+def _anonymized_label(index: int) -> str:
+    """검색 결과 순번(0-based)을 익명 라벨 문자열로 변환한다."""
+    if index < len(_ANONYMIZED_LABEL_LETTERS):
+        return f"유사 사례 {_ANONYMIZED_LABEL_LETTERS[index]}"
+    return f"유사 사례 {index + 1}"
+
+
+def _diagnosis_to_history_dict(diagnosis: "models.Diagnosis") -> dict:
+    """scope="this_patient" 결과 1건을 dict로 직렬화한다.
+
+    communication_summary는 diagnosis_id FK로 확정적으로 연결되어 있으므로
+    (app/routers/core.py의 /summarize 참고), 시간 근접성 추정 없이 그대로
+    조인해서 처방/환자우려점을 채운다. 아직 대화 요약이 없는 진단은 두
+    필드가 None이 된다.
+    """
+    summary = diagnosis.communication_summary
+    return {
+        "diagnosis_id": diagnosis.id,
+        "date": diagnosis.diagnosed_at.date().isoformat() if diagnosis.diagnosed_at else None,
+        "anatomy_site": diagnosis.anatomy_site.value if diagnosis.anatomy_site else None,
+        "diagnosis": diagnosis.diagnosis.value if diagnosis.diagnosis else None,
+        "diagnosis_detail": diagnosis.diagnosis_detail,
+        "confidence_score": diagnosis.confidence_score,
+        "prescription": summary.처방 if summary else None,
+        "concern": summary.환자우려점 if summary else None,
+    }
+
+
+def _retrieve_this_patient(db, patient_pk: int) -> list[dict]:
+    """현재 환자의 전체 진단 이력을 diagnosed_at 오름차순으로 반환한다.
+
+    query_text는 의도적으로 받지 않는다 — 이 스코프는 벡터 검색이 아니라
+    "환자 본인의 전체 기록"이라는 확정적 SQL 조회이므로, 어떤 질의로
+    호출되든 결과는 항상 동일하다. "특정 부위 기록이 없다"는 답변도 이
+    전체 이력에서 generate 노드가 스스로 도출해야 하는 사실이다.
+    """
+    diagnoses = (
+        db.query(models.Diagnosis)
+        .filter(models.Diagnosis.patient_id == patient_pk)
+        .order_by(models.Diagnosis.diagnosed_at.asc())
+        .all()
+    )
+    return [_diagnosis_to_history_dict(d) for d in diagnoses]
+
+
+def _resolve_default_benign_malignant(db, patient_pk: int) -> Optional[str]:
+    """benign_malignant 인자가 생략됐을 때 쓸 기본 필터 값을 현재 환자의 최신 진단에서 가져온다."""
+    latest = (
+        db.query(models.Diagnosis)
+        .filter(models.Diagnosis.patient_id == patient_pk)
+        .order_by(models.Diagnosis.diagnosed_at.desc(), models.Diagnosis.id.desc())
+        .first()
+    )
+    return latest.diagnosis.value if latest and latest.diagnosis else None
+
+
+def _retrieve_similar_patients(
+    db,
+    patient_pk: int,
+    query_text: str,
+    benign_malignant: Optional[str],
+    top_k: int,
+) -> list[dict]:
+    """diagnosis(benign/malignant) 1차 필터 후 pgvector 코사인 유사도로 정렬된 타 환자 사례를 반환한다(PRD §7.4).
+
+    diagnosis_detail(melanoma/nevus/unknown 등 세분류)이 아니라 diagnosis
+    (benign/malignant)로 1차 필터링하는 이유는, mock 데이터의 세분류가
+    unknown 비중이 높아 신뢰도가 낮기 때문이다 — 굵은 카테고리로 먼저 걸러
+    벡터 유사도 정렬의 입력 후보군을 의미 있게 좁힌다. benign_malignant가
+    None으로 확정되지 않으면(예: 현재 환자에게 진단 이력 자체가 없음) 빈
+    리스트를 반환한다 — 필터 없이 전체를 검색하면 무관한 사례까지 섞여
+    유사도 정렬의 의미가 없어지기 때문이다.
+    """
+    if benign_malignant is None:
+        benign_malignant = _resolve_default_benign_malignant(db, patient_pk)
+    if benign_malignant is None:
+        return []
+
+    query_vector = _get_embeddings().embed_query(query_text)
+    distance = models.Diagnosis.embedding.cosine_distance(query_vector)
+
+    rows = (
+        db.query(models.Diagnosis, (1 - distance).label("similarity"))
+        .filter(models.Diagnosis.diagnosis == benign_malignant)
+        .filter(models.Diagnosis.patient_id != patient_pk)
+        .filter(models.Diagnosis.embedding.isnot(None))
+        .order_by(distance.asc())
+        .limit(top_k)
+        .all()
+    )
+
+    results = []
+    for index, (diagnosis, similarity) in enumerate(rows):
+        results.append(
+            {
+                "anonymized_label": _anonymized_label(index),
+                "date": diagnosis.diagnosed_at.date().isoformat() if diagnosis.diagnosed_at else None,
+                "anatomy_site": diagnosis.anatomy_site.value if diagnosis.anatomy_site else None,
+                "diagnosis": diagnosis.diagnosis.value if diagnosis.diagnosis else None,
+                "diagnosis_detail": diagnosis.diagnosis_detail,
+                "confidence_score": diagnosis.confidence_score,
+                "similarity": round(float(similarity), 4),
+            }
+        )
+    return results
+
+
+@tool(args_schema=RetrievePatientHistoryArgs)
+def retrieve_patient_history(
+    scope: Literal["this_patient", "similar_patients"],
+    query_text: str,
+    benign_malignant: Optional[Literal["benign", "malignant"]] = None,
+    top_k: int = 5,
+    *,
+    config: RunnableConfig,
+) -> list[dict]:
+    """환자 본인의 진단 이력을 조회하거나, 익명화된 타 환자 유사 사례를 검색한다.
+
+    scope="this_patient"는 벡터 검색이 아니라 현재 환자로 단순 필터링 후
+    diagnosed_at 오름차순 정렬(전체 이력 브리핑에는 유사도 랭킹이
+    불필요하므로)하며, communication_summary(처방/환자우려점)도 함께
+    반환한다. scope="similar_patients"는 diagnosis(benign/malignant)
+    1차 필터 후 pgvector 코사인 유사도로 정렬하고, 현재 환자를 제외하며,
+    반환값에는 실제 patient_id 대신 anonymized_label만 포함한다 — 에이전트가
+    실수로 타 환자 식별정보를 응답에 포함시키는 것을 도구 레벨에서 차단한다.
+
+    현재 세션의 환자(patient_pk)는 인자가 아니라 config를 통해 주입되므로
+    LLM이 다른 환자를 임의로 조회할 수 없다.
+    """
+    db = config["configurable"]["db_session"]
+    patient_pk = config["configurable"]["patient_pk"]
+
+    if scope == "this_patient":
+        return _retrieve_this_patient(db, patient_pk)
+    return _retrieve_similar_patients(db, patient_pk, query_text, benign_malignant, top_k)

@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from app.routers import router
 from app.model_loader import load_model
+from app.agent.checkpointer import setup_checkpointer
 
 app = FastAPI()
 model = load_model()
@@ -20,3 +21,9 @@ app.add_middleware(
 
 # 라우터 등록
 app.include_router(router)
+
+
+@app.on_event("startup")
+def _setup_chat_checkpointer():
+    # 멀티턴 대화(PRD §9.1) 체크포인트 테이블이 없으면 생성한다(멱등).
+    setup_checkpointer()

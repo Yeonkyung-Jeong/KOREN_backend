@@ -68,3 +68,8 @@ ALTER TABLE diagnoses
 -- 코사인 유사도 기준 ANN 인덱스 (pgvector 0.5+ 가정)
 CREATE INDEX diagnoses_embedding_hnsw_idx
   ON diagnoses USING hnsw (embedding vector_cosine_ops);
+
+-- LANGGRAPH CHECKPOINTER (docs/prd-patient-history-assistant.md §9.1)
+-- checkpoints / checkpoint_blobs / checkpoint_writes / checkpoint_migrations 테이블은
+-- 여기서 수동으로 만들지 않는다. app/agent/checkpointer.py의 PostgresSaver.setup()이
+-- 앱 기동 시(app/main.py 스타트업 훅) 멱등적으로 생성/마이그레이션한다.

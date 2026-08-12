@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "patient_history_assistant": "./app/agent/graph.py:graph"
+  },
+  "env": ".env",
+  "python_version": "3.11"
+}
