@@ -55,11 +55,21 @@ There are no tests, linter, or CI configuration in this repo currently.
 - `app/config.py` — Loads `OPENAI_API_KEY` from `.env`.
 - `workspace/clientResults/` — Local cache location matching the federated-learning workspace layout from the upstream training repo; contains the downloaded model weights.
 
+## LangGraph agentic RAG conventions (`app/agent/`)
+
+These conventions were established while building the `app/agent/` StateGraph (patient history chat, `POST /patients/{patient_id}/chat`) and should be followed for future agent/graph work in this repo:
+
+- **Reasoning before verdict in structured-output schemas.** When a Pydantic schema used with `llm.with_structured_output()` combines a boolean judgment with a `reasoning` field, declare `reasoning` *before* the boolean field. OpenAI structured outputs fill fields in declaration order, so a verdict-first schema lets the model commit to a conclusion and rationalize it afterward; reasoning-first forces it to work through the evidence before deciding. See `DocumentGrade` / `AnswerGrade` in `app/agent/schemas.py`.
+- **Deterministic logic over LLM judgment where there's no real ambiguity.** If a check has only one correct answer given the inputs (e.g. grading a confirmed, query-independent SQL result), implement it as a plain Python rule instead of an LLM call — it's cheaper, faster, and can't be talked into the wrong answer. See the `this_patient`-scope branch of `grade_documents` in `app/agent/nodes.py`.
+- **Reserve the stronger model for the node(s) where the cost of being wrong is highest.** Keep a cheap model (`gpt-4o-mini`) as the default for routing/rewriting/generation, and only upgrade a specific node (e.g. the hallucination-check grader) to a stronger model once the cheap model has shown unreliable judgment there in practice. See `LLM_MODEL` vs `GRADING_LLM_MODEL` in `app/agent/nodes.py`.
+- **Custom `StateGraph` over `create_agent` once multiple node roles need conditional routing/retry loops.** `create_agent`'s prebuilt single ReAct loop fits one LLM-decides-when-to-stop pattern; once the flow needs distinct roles (rewrite/retrieve/grade/generate) wired together with conditional edges and retry loops, build the graph explicitly with `StateGraph` + `add_node`/`add_edge`/`add_conditional_edges` instead. Each node then calls its own `llm.with_structured_output(Schema, method="function_calling")` rather than relying on a single agent-wide structured-output contract. See `app/agent/graph.py`.
+
 ## Notes on current behavior
 
 - The model is loaded twice at process startup: once in `main.py` and once in `routers.py` (both call `load_model()` independently at import time).
 - `uploads/` (raw patient images) is gitignored and created on demand; there's no cleanup logic.
 - Korean-language field names and comments are used throughout for domain concepts (diagnosis categories, summary fields) — preserve them when editing rather than translating, since the frontend and OpenAI prompt both depend on the exact Korean keys.
+- Indentation is intentionally mixed: newer modules (`app/agent/`, `app/routers/chat.py`, `app/routers/__init__.py`) use standard PEP8 4-space indentation, while older files (`app/models.py`, `app/routers/core.py`, etc.) use 2-space. Don't reformat existing files to 4-space, and don't reformat new files to 2-space to "match" — the split is deliberate, not drift.
 
 ## 커밋 메시지 규칙
 
