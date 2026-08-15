@@ -1,4 +1,6 @@
-from app.agent.nodes import context_organizer, fallback_answer
+from datetime import date
+
+from app.agent.nodes import _deterministic_clinical_note, context_organizer, fallback_answer
 
 
 def test_context_organizer_formats_this_patient_timeline():
@@ -23,6 +25,26 @@ def test_context_organizer_formats_this_patient_timeline():
     assert "diagnosis_id=1" in context
     assert "confidence=0.12" in context
     assert "경과 관찰" in context
+
+
+def test_context_organizer_injects_todays_date_for_this_patient_scope():
+    state = {
+        "retrieval_scope": "this_patient",
+        "retrieved_docs": [
+            {
+                "diagnosis_id": 1,
+                "date": "2025-01-01",
+                "anatomy_site": "torso",
+                "diagnosis": "benign",
+                "diagnosis_detail": "nevus",
+                "confidence_score": 0.12,
+                "prescription": "경과 관찰",
+                "concern": "특이 증상 없음",
+            }
+        ],
+    }
+    result = context_organizer(state, {})
+    assert f"[오늘 날짜: {date.today().isoformat()}]" in result["organized_context"]
 
 
 def test_context_organizer_formats_similar_patients_cases():
@@ -50,6 +72,7 @@ def test_context_organizer_handles_empty_results():
     state = {"retrieval_scope": "this_patient", "retrieved_docs": []}
     result = context_organizer(state, {})
     assert "검색 결과 없음" in result["organized_context"]
+    assert f"[오늘 날짜: {date.today().isoformat()}]" in result["organized_context"]
 
 
 def test_fallback_answer_produces_valid_answer_response():
@@ -58,3 +81,41 @@ def test_fallback_answer_produces_valid_answer_response():
     assert result["final_response"]["type"] == "answer"
     assert "검색 결과가 0건입니다." in result["final_response"]["answer_text"]
     assert result["messages"][0].content == result["final_response"]["answer_text"]
+
+
+def test_deterministic_clinical_note_flags_age_and_sex_differences():
+    note = _deterministic_clinical_note(60, "male", 41, "female")
+    assert "연령대" in note
+    assert "성별" in note
+    assert "진행" not in note  # 의학적 인과관계(진행 속도 등) 단정 금지
+    assert "예후" not in note
+
+
+def test_deterministic_clinical_note_flags_only_sex_difference():
+    note = _deterministic_clinical_note(60, "male", 60, "female")
+    assert "연령대" not in note
+    assert "성별" in note
+
+
+def test_deterministic_clinical_note_no_difference():
+    note = _deterministic_clinical_note(60, "male", 60, "male")
+    assert "유사한 사례" in note
+
+
+def test_deterministic_clinical_note_handles_missing_data():
+    note = _deterministic_clinical_note(None, None, 41, "female")
+    assert "유사한 사례" in note
+
+
+def test_fallback_answer_prefers_answer_grade_reasoning_when_grounding_failed():
+    # doc_grade_reasoning은 this_patient 스코프에서 grade_documents가 성공했을 때도
+    # 항상 채워지므로, answer_grounded=False(grade_answer 루프에서 온 실패)일 때는
+    # 진짜 실패 원인인 answer_grade_reasoning을 우선해야 한다.
+    state = {
+        "doc_grade_reasoning": "환자 본인의 전체 진단 이력을 확보함.",
+        "answer_grounded": False,
+        "answer_grade_reasoning": "clinical_note의 예후 판단이 컨텍스트로 뒷받침되지 않습니다.",
+    }
+    result = fallback_answer(state, {})
+    assert "clinical_note의 예후 판단이 컨텍스트로 뒷받침되지 않습니다." in result["final_response"]["answer_text"]
+    assert "환자 본인의 전체 진단 이력을 확보함." not in result["final_response"]["answer_text"]

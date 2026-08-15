@@ -2,6 +2,7 @@
 # 8개 그래프 노드. PRD §9.3에 대응하되, create_agent의 단일 ReAct 루프가 아니라
 # 역할이 분리된 노드 + 조건부 엣지로 재작성/평가/재시도 흐름을 구성한다.
 import os
+from datetime import date
 from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -199,7 +200,7 @@ def context_organizer(state: AgentState, config: RunnableConfig) -> dict:
     docs = state.get("retrieved_docs", [])
 
     if scope == "this_patient":
-        lines = ["[환자 진단 타임라인]"]
+        lines = [f"[오늘 날짜: {date.today().isoformat()}]", "[환자 진단 타임라인]"]
         for d in docs:
             confidence = d.get("confidence_score")
             confidence_text = f"{confidence:.2f}" if confidence is not None else "-"
@@ -210,13 +211,19 @@ def context_organizer(state: AgentState, config: RunnableConfig) -> dict:
             )
     else:
         lines = ["[유사 환자 사례(익명화됨)]"]
+        if docs:
+            lines.append(
+                f"[현재 환자] 나이 {docs[0].get('current_patient_age') or '-'}세 | "
+                f"성별 {docs[0].get('current_patient_sex') or '-'}"
+            )
         for c in docs:
             lines.append(
                 f"- {c['anonymized_label']} | {c['date']} | {c['anatomy_site']} | "
-                f"{c['diagnosis']}({c.get('diagnosis_detail') or '-'}) | similarity={c['similarity']:.2f}"
+                f"{c['diagnosis']}({c.get('diagnosis_detail') or '-'}) | similarity={c['similarity']:.2f} | "
+                f"나이 {c.get('age') or '-'}세 | 성별 {c.get('sex') or '-'}"
             )
 
-    if len(lines) == 1:
+    if not docs:
         lines.append("(검색 결과 없음)")
 
     return {"organized_context": "\n".join(lines)}
@@ -231,7 +238,23 @@ GENERATE_SYSTEM_PROMPT = (
     "timeline/cases의 diagnosis 필드에는 컨텍스트의 '진단(세부라벨)' 표기에서 "
     "괄호 앞의 benign 또는 malignant 값만 넣고, 세부 라벨(예: melanoma, nevus)은 "
     "diagnosis 필드에 포함하지 마세요 — 필요하면 narrative_summary/answer_text 등 "
-    "서술형 텍스트에서만 언급하세요."
+    "서술형 텍스트에서만 언급하세요.\n"
+    "brief 응답을 생성할 때는 다음을 지키세요 — narrative_summary는 방문 간격(예: "
+    "'최근 2년간 총 5회 내원, 평균 방문 간격 약 5개월'), 방문별 처방 변화, 환자 "
+    "우려점의 변화를 컨텍스트에 있는 구체적인 수치·문구로 서술하세요. '정기적인 "
+    "추적 관찰이 필요합니다' 같은 일반론적 문장만으로 narrative_summary나 "
+    "recommendation을 채우지 마세요. recommendation은 직전 방문일로부터 오늘까지 "
+    "경과한 기간을 계산하고, 통상적인 관찰 주기(양성은 3~6개월, 악성 이력이 있으면 "
+    "더 짧게)를 근거로 삼아 다음 진료가 왜 필요한지, 언제쯤이 적절한지를 구체적으로 "
+    "제시하세요.\n"
+    "similar_cases 응답을 생성할 때는 컨텍스트의 '[현재 환자]' 나이·성별과 각 "
+    "사례의 나이·성별을 반드시 비교하세요. shared_features/differences에는 "
+    "부위·진단 결과 같은 임상 정보뿐 아니라 나이대·성별의 일치·차이도 구체적으로 "
+    "포함하세요(예: '동일 부위(torso)에서 발생'은 shared_features에, "
+    "'환자 연령대 차이(60대 vs 40대)'는 differences에). clinical_note은 시스템이 "
+    "나이·성별 비교 결과로 자동으로 덮어쓰므로, 짧은 placeholder 문장만 채워 두세요 "
+    "— 이 필드에서는 진행 속도·예후처럼 컨텍스트에 없는 의학적 인과관계를 절대 "
+    "단정하지 마세요."
 )
 
 
@@ -239,6 +262,28 @@ def _final_response_text(response) -> str:
     if hasattr(response, "narrative_summary"):
         return response.narrative_summary
     return response.answer_text
+
+
+def _deterministic_clinical_note(
+    current_age, current_sex, case_age, case_sex
+) -> str:
+    """나이·성별 차이 유무만 기계적으로 비교해 안전한 안내 문구를 만든다.
+
+    '여성이 남성보다 진행이 빠르다'류의 의학적 인과관계는 컨텍스트로 뒷받침될
+    수 없는 주장이라 LLM에게 맡기면 종종 근거 없이 단정해버린다(수동 QA에서
+    반복 확인됨). 나이·성별이 다른지 같은지는 단순 비교라 모호함이 없으므로,
+    이 부분만큼은 LLM 판단 대신 결정적 로직으로 처리해 할루시네이션 가능성
+    자체를 없앤다.
+    """
+    diffs = []
+    if current_age is not None and case_age is not None and current_age != case_age:
+        diffs.append("연령대")
+    if current_sex is not None and case_sex is not None and current_sex != case_sex:
+        diffs.append("성별")
+
+    if not diffs:
+        return "현재 환자와 나이·성별이 유사한 사례이므로 참고할 수 있습니다."
+    return f"현재 환자와 {'·'.join(diffs)} 차이가 있으므로, 이 점을 고려해 의사가 직접 판단해 주세요."
 
 
 def generate(state: AgentState, config: RunnableConfig) -> dict:
@@ -270,6 +315,18 @@ def generate(state: AgentState, config: RunnableConfig) -> dict:
     )
     response = envelope.response
 
+    if getattr(response, "type", None) == "similar_cases":
+        docs_by_label = {d["anonymized_label"]: d for d in state.get("retrieved_docs", [])}
+        for case in response.cases:
+            doc = docs_by_label.get(case.anonymized_label)
+            if doc is not None:
+                case.clinical_note = _deterministic_clinical_note(
+                    doc.get("current_patient_age"),
+                    doc.get("current_patient_sex"),
+                    doc.get("age"),
+                    doc.get("sex"),
+                )
+
     return {
         "final_response": response.model_dump(),
         "messages": [AIMessage(content=_final_response_text(response))],
@@ -288,7 +345,15 @@ GRADE_ANSWER_SYSTEM_PROMPT = (
     "예시: 컨텍스트에 'torso 진단 1건, upper_extremity 진단 1건'만 있고 답변이 "
     "'head_neck(두피) 진단 기록은 없습니다'라고 말했다면 → 컨텍스트의 어떤 항목도 "
     "head_neck이 아니므로 이 부재 진술은 grounded(근거 충분)입니다. is_grounded=false로 "
-    "판정하면 틀린 것입니다."
+    "판정하면 틀린 것입니다.\n"
+    "중요 — 권고(recommendation) 문구 판정 규칙: recommendation 필드는 컨텍스트의 "
+    "구체적 사실(진단일, 진단 결과, 오늘 날짜 등)에 기반해 다음 진료 시점을 "
+    "'추정·제안'하는 문구입니다. 방문 주기·관찰 기간처럼 일반적인 임상 관행에 대한 "
+    "지식을 근거로 특정 날짜/기간을 제안했다면, 그 날짜 자체가 컨텍스트에 글자 그대로 "
+    "적혀 있지 않아도 컨텍스트의 사실(진단일, 오늘 날짜, 진단 결과)에서 합리적으로 "
+    "도출된 제안이면 grounded로 판정하세요. narrative_summary/timeline/summary처럼 "
+    "과거 사실을 서술하는 필드에서 컨텍스트에 없는 사실을 만들어낸 경우에만 근거 "
+    "부족으로 판정하세요."
 )
 
 
@@ -329,12 +394,23 @@ def grade_answer(state: AgentState, config: RunnableConfig) -> dict:
 
 
 def fallback_answer(state: AgentState, config: RunnableConfig) -> dict:
-    """재시도 한도를 초과했을 때 안전한 answer 응답으로 강제 전환하는 노드(LLM 미사용, 무한 루프 방지의 최종 안전판)."""
-    reason = (
-        state.get("doc_grade_reasoning")
-        or state.get("answer_grade_reasoning")
-        or "요청을 처리하는 데 필요한 정보를 충분히 확인하지 못했습니다."
-    )
+    """재시도 한도를 초과했을 때 안전한 answer 응답으로 강제 전환하는 노드(LLM 미사용, 무한 루프 방지의 최종 안전판).
+
+    이 노드는 grade_documents 루프(문서 불충분) 또는 grade_answer 루프(근거
+    부족)의 두 경로 중 하나로 진입할 수 있다. answer_grounded가 False로 명시적
+    으로 설정되어 있으면 실제 실패 지점은 grade_answer이므로
+    answer_grade_reasoning을 우선 사용한다 — doc_grade_reasoning은 그 경우
+    grade_documents가 "충분함"으로 판단했을 때도 항상 채워져 있어(this_patient
+    스코프는 결정적으로 항상 채움) 실제 실패 원인을 가리는 문제가 있었다.
+    """
+    if state.get("answer_grounded") is False and state.get("answer_grade_reasoning"):
+        reason = state["answer_grade_reasoning"]
+    else:
+        reason = (
+            state.get("doc_grade_reasoning")
+            or state.get("answer_grade_reasoning")
+            or "요청을 처리하는 데 필요한 정보를 충분히 확인하지 못했습니다."
+        )
     text = f"죄송합니다. 이 질문에 확실하게 답변드리기 어렵습니다. ({reason}) 질문을 조금 더 구체적으로 다시 말씀해 주시겠어요?"
     response = AnswerResponse(answer_text=text, citations=[])
 

@@ -107,11 +107,16 @@ def _retrieve_similar_patients(
     if benign_malignant is None:
         return []
 
+    current_patient = db.query(models.Patient).filter(models.Patient.id == patient_pk).first()
+    current_age = current_patient.age if current_patient else None
+    current_sex = current_patient.sex.value if current_patient and current_patient.sex else None
+
     query_vector = _get_embeddings().embed_query(query_text)
     distance = models.Diagnosis.embedding.cosine_distance(query_vector)
 
     rows = (
         db.query(models.Diagnosis, (1 - distance).label("similarity"))
+        .join(models.Patient, models.Diagnosis.patient_id == models.Patient.id)
         .filter(models.Diagnosis.diagnosis == benign_malignant)
         .filter(models.Diagnosis.patient_id != patient_pk)
         .filter(models.Diagnosis.embedding.isnot(None))
@@ -131,6 +136,10 @@ def _retrieve_similar_patients(
                 "diagnosis_detail": diagnosis.diagnosis_detail,
                 "confidence_score": diagnosis.confidence_score,
                 "similarity": round(float(similarity), 4),
+                "age": diagnosis.patient.age if diagnosis.patient else None,
+                "sex": diagnosis.patient.sex.value if diagnosis.patient and diagnosis.patient.sex else None,
+                "current_patient_age": current_age,
+                "current_patient_sex": current_sex,
             }
         )
     return results

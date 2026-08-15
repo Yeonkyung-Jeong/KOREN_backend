@@ -171,9 +171,13 @@ class SimilarCase(BaseModel):
         anatomy_site: 병변 부위.
         diagnosis: 진단 결과(benign/malignant).
         similarity: 현재 환자 질의와의 코사인 유사도(0.0~1.0).
-        shared_features: 현재 환자와 공통되는 특징 목록.
-        differences: 현재 환자와 다른 점 목록.
-        clinical_note: 차이점을 고려한 임상적 주의사항 한두 문장.
+        shared_features: 현재 환자와 공통되는 특징 목록(부위·진단 결과뿐 아니라
+            나이대·성별 일치 여부도 포함).
+        differences: 현재 환자와 다른 점 목록(나이대·성별 차이 포함, 예:
+            "환자 연령대 차이(60대 vs 40대)").
+        clinical_note: 나이·성별 차이가 있다는 사실과 의사의 판단이 필요하다는
+            점을 안내하는 한두 문장. 컨텍스트에 없는 의학적 인과관계(예: 특정
+            성별/연령대가 더 빠르게 진행된다는 단정)는 서술하지 않는다.
     """
 
     anonymized_label: str = Field(description="실제 환자 식별정보 대신 노출하는 익명 라벨")
@@ -181,9 +185,13 @@ class SimilarCase(BaseModel):
     anatomy_site: str = Field(description="병변 부위")
     diagnosis: str = Field(description="진단 결과(benign/malignant)")
     similarity: float = Field(description="현재 환자 질의와의 코사인 유사도")
-    shared_features: list[str] = Field(description="현재 환자와 공통되는 특징")
-    differences: list[str] = Field(description="현재 환자와 다른 점")
-    clinical_note: str = Field(description="차이점을 고려한 임상적 주의사항")
+    shared_features: list[str] = Field(
+        description="현재 환자와 공통되는 특징(나이대·성별 일치 여부 포함)"
+    )
+    differences: list[str] = Field(description="현재 환자와 다른 점(나이대·성별 차이 포함)")
+    clinical_note: str = Field(
+        description="나이·성별 차이와 의사 판단 필요성 안내(근거 없는 의학적 인과관계 단정 금지)"
+    )
 
 
 class SimilarCasesResponse(BaseModel):
