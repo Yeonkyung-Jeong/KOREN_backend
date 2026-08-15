@@ -175,9 +175,12 @@ class SimilarCase(BaseModel):
             나이대·성별 일치 여부도 포함).
         differences: 현재 환자와 다른 점 목록(나이대·성별 차이 포함, 예:
             "환자 연령대 차이(60대 vs 40대)").
-        clinical_note: 나이·성별 차이가 있다는 사실과 의사의 판단이 필요하다는
-            점을 안내하는 한두 문장. 컨텍스트에 없는 의학적 인과관계(예: 특정
-            성별/연령대가 더 빠르게 진행된다는 단정)는 서술하지 않는다.
+        clinical_note: 이 사례의 진단·환자 호소·처방을 사실 그대로 요약한
+            한 문장(예: "melanoma 진단을 받았고, 환자가 ~을 호소했고, ~를
+            처방받았습니다"). 시스템이 DB 기록으로 결정적으로 채우므로
+            LLM은 짧은 placeholder만 넣으면 된다 — 컨텍스트에 없는 의학적
+            인과관계(예: 특정 성별/연령대가 더 빠르게 진행된다는 단정)는
+            서술하지 않는다.
     """
 
     anonymized_label: str = Field(description="실제 환자 식별정보 대신 노출하는 익명 라벨")
@@ -190,7 +193,7 @@ class SimilarCase(BaseModel):
     )
     differences: list[str] = Field(description="현재 환자와 다른 점(나이대·성별 차이 포함)")
     clinical_note: str = Field(
-        description="나이·성별 차이와 의사 판단 필요성 안내(근거 없는 의학적 인과관계 단정 금지)"
+        description="이 사례의 진단·환자 호소·처방 요약(시스템이 DB 기록으로 결정적으로 덮어씀)"
     )
 
 
@@ -199,14 +202,14 @@ class SimilarCasesResponse(BaseModel):
 
     Attributes:
         type: 응답 타입 판별자. 항상 "similar_cases".
+        answer_text: 사례들을 종합한 요약 문장.
         cases: 익명화된 유사 사례 목록. 실제 patient_id/name은 절대
             포함하지 않는다.
-        answer_text: 사례들을 종합한 요약 문장.
     """
 
     type: Literal["similar_cases"] = "similar_cases"
-    cases: list[SimilarCase] = Field(description="익명화된 유사 사례 목록")
     answer_text: str = Field(description="사례들을 종합한 요약 문장")
+    cases: list[SimilarCase] = Field(description="익명화된 유사 사례 목록")
 
 
 class Citation(BaseModel):
@@ -269,10 +272,13 @@ class RetrievePatientHistoryArgs(BaseModel):
     """retrieve_patient_history 도구의 호출 인자.
 
     retrieve 노드가 llm.bind_tools()로 이 스키마를 바인딩하고, LLM이
-    scope/query_text/benign_malignant/top_k를 스스로 채운다. 실제
+    scope/query_text/benign_malignant/anatomy_site를 스스로 채운다. 실제
     조회 대상 환자(patient_id)는 이 스키마에 포함하지 않고
     RunnableConfig를 통해 도구 구현부에 주입한다 — LLM이 임의의 다른
-    환자를 조회하는 경로 자체를 차단하기 위함(PRD §9.2).
+    환자를 조회하는 경로 자체를 차단하기 위함(PRD §9.2). 반환 개수(top_k)도
+    의도적으로 이 스키마에 포함하지 않는다 — LLM이 매 질의마다 다른 값을
+    골라버리면 화면에 노출되는 사례 개수가 제각각이 되어 근거가 불명확해지므로,
+    app/agent/tools.py의 TOP_K_SIMILAR_CASES 상수로 고정한다.
 
     Attributes:
         scope: "this_patient"면 현재 환자 본인의 진단 이력을 SQL
@@ -285,7 +291,14 @@ class RetrievePatientHistoryArgs(BaseModel):
         benign_malignant: similar_patients 스코프에서 사용하는 1차
             필터 값. 지정하지 않으면 현재 환자의 최신 진단 결과를
             기본값으로 사용한다. this_patient 스코프에서는 무시된다.
-        top_k: 반환할 최대 결과 개수.
+        anatomy_site: similar_patients 스코프에서 사용하는 부위 1차
+            필터. 의사의 질의가 특정 부위(하지/상지/몸통/두경부 등)를
+            명시할 때만 채우고, 그렇지 않으면 비워 둔다. 벡터 유사도만으로는
+            한국어 부위 표현(예: "하지")이 임베딩된 영문 부위값
+            (lower_extremity)과 항상 가깝게 매칭된다는 보장이 없어
+            부위 지정 질의에서 엉뚱한 부위가 상위로 올라오는 문제가
+            있었다 — 부위가 명시된 질의는 이 필터로 결정적으로
+            좁힌다.
     """
 
     scope: Literal["this_patient", "similar_patients"] = Field(description="검색 범위")
@@ -294,4 +307,7 @@ class RetrievePatientHistoryArgs(BaseModel):
         default=None,
         description="similar_patients 스코프의 1차 필터. 미지정 시 현재 환자의 최신 진단값을 기본으로 사용",
     )
-    top_k: int = Field(default=5, description="반환할 최대 결과 개수")
+    anatomy_site: Optional[Literal["head_neck", "upper_extremity", "lower_extremity", "torso"]] = Field(
+        default=None,
+        description="similar_patients 스코프의 부위 1차 필터. 질의가 특정 부위를 명시할 때만 채움",
+    )

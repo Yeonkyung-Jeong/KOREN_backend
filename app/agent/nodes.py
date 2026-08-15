@@ -109,7 +109,12 @@ RETRIEVE_SYSTEM_PROMPT = (
     "예: '최근 이력 브리핑', '두피 쪽도 본 적 있어?')이면 scope='this_patient'를, "
     "다른 환자의 비슷한 사례를 찾는 질문(예: '비슷한 케이스 있어?')이면 "
     "scope='similar_patients'를 선택하세요. query_text에는 검색 의도를 담은 질의를 "
-    "그대로 넣으세요."
+    "그대로 넣으세요.\n"
+    "scope='similar_patients'이고 질의가 특정 부위를 명시하면(예: '하지 부위', "
+    "'팔 쪽', '몸통에 난 것', '두피/목') anatomy_site를 반드시 해당 값으로 채우세요 "
+    "— 두경부/얼굴/두피/목→head_neck, 팔/손/상지→upper_extremity, "
+    "다리/발/하지→lower_extremity, 몸통/등/가슴/배→torso. 부위가 명시되지 않았으면 "
+    "비워 두세요."
 )
 
 
@@ -220,7 +225,8 @@ def context_organizer(state: AgentState, config: RunnableConfig) -> dict:
             lines.append(
                 f"- {c['anonymized_label']} | {c['date']} | {c['anatomy_site']} | "
                 f"{c['diagnosis']}({c.get('diagnosis_detail') or '-'}) | similarity={c['similarity']:.2f} | "
-                f"나이 {c.get('age') or '-'}세 | 성별 {c.get('sex') or '-'}"
+                f"나이 {c.get('age') or '-'}세 | 성별 {c.get('sex') or '-'} | "
+                f"처방: {c.get('prescription') or '-'} | 환자 반응: {c.get('concern') or '-'}"
             )
 
     if not docs:
@@ -252,9 +258,9 @@ GENERATE_SYSTEM_PROMPT = (
     "부위·진단 결과 같은 임상 정보뿐 아니라 나이대·성별의 일치·차이도 구체적으로 "
     "포함하세요(예: '동일 부위(torso)에서 발생'은 shared_features에, "
     "'환자 연령대 차이(60대 vs 40대)'는 differences에). clinical_note은 시스템이 "
-    "나이·성별 비교 결과로 자동으로 덮어쓰므로, 짧은 placeholder 문장만 채워 두세요 "
-    "— 이 필드에서는 진행 속도·예후처럼 컨텍스트에 없는 의학적 인과관계를 절대 "
-    "단정하지 마세요."
+    "진단·환자 호소·처방 요약으로 자동으로 덮어쓰므로, 짧은 placeholder 문장만 "
+    "채워 두세요 — 이 필드에서는 진행 속도·예후처럼 컨텍스트에 없는 의학적 "
+    "인과관계를 절대 단정하지 마세요."
 )
 
 
@@ -264,26 +270,38 @@ def _final_response_text(response) -> str:
     return response.answer_text
 
 
-def _deterministic_clinical_note(
-    current_age, current_sex, case_age, case_sex
-) -> str:
-    """나이·성별 차이 유무만 기계적으로 비교해 안전한 안내 문구를 만든다.
+def _has_final_consonant(text: str) -> bool:
+    """조사(을/를 등) 선택을 위해 마지막 한글 음절에 받침이 있는지 판정한다."""
+    for ch in reversed(text.strip()):
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            return (code - 0xAC00) % 28 != 0
+        if ch.isalnum():
+            return False  # 영문/숫자로 끝나면 받침 없는 것으로 취급
+    return False
 
-    '여성이 남성보다 진행이 빠르다'류의 의학적 인과관계는 컨텍스트로 뒷받침될
-    수 없는 주장이라 LLM에게 맡기면 종종 근거 없이 단정해버린다(수동 QA에서
-    반복 확인됨). 나이·성별이 다른지 같은지는 단순 비교라 모호함이 없으므로,
-    이 부분만큼은 LLM 판단 대신 결정적 로직으로 처리해 할루시네이션 가능성
-    자체를 없앤다.
+
+def _josa_eul_reul(text: str) -> str:
+    return "을" if _has_final_consonant(text) else "를"
+
+
+def _deterministic_case_summary(diagnosis, diagnosis_detail, prescription, concern) -> str:
+    """이 사례의 진단·환자 호소·처방을 DB 기록 그대로 조립한 요약 문장을 만든다.
+
+    이전에는 나이·성별 차이 여부만 안내했는데("연령대 차이가 있으니 의사가
+    판단해 주세요"), 실제 QA에서 이 문장이 사례 내용을 전혀 설명하지 못해
+    쓸모가 없다는 피드백을 받았다. 진단명/환자 호소/처방은 이미 DB에 구조화된
+    사실이라 LLM이 요약해도 새로 판단할 게 없고, 오히려 LLM에게 맡기면
+    컨텍스트에 없는 인과관계를 덧붙이는 사례가 있었으므로(수동 QA에서 반복
+    확인됨) 그대로 문장으로 조립하는 것까지 결정적 로직으로 처리한다.
     """
-    diffs = []
-    if current_age is not None and case_age is not None and current_age != case_age:
-        diffs.append("연령대")
-    if current_sex is not None and case_sex is not None and current_sex != case_sex:
-        diffs.append("성별")
-
-    if not diffs:
-        return "현재 환자와 나이·성별이 유사한 사례이므로 참고할 수 있습니다."
-    return f"현재 환자와 {'·'.join(diffs)} 차이가 있으므로, 이 점을 고려해 의사가 직접 판단해 주세요."
+    label = diagnosis_detail or diagnosis or "질환"
+    clauses = [f"{label} 진단을 받았"]
+    if concern:
+        clauses.append(f"환자가 {concern}{_josa_eul_reul(concern)} 호소했")
+    if prescription:
+        clauses.append(f"{prescription}{_josa_eul_reul(prescription)} 처방받았")
+    return "고, ".join(clauses) + "습니다."
 
 
 def generate(state: AgentState, config: RunnableConfig) -> dict:
@@ -320,11 +338,11 @@ def generate(state: AgentState, config: RunnableConfig) -> dict:
         for case in response.cases:
             doc = docs_by_label.get(case.anonymized_label)
             if doc is not None:
-                case.clinical_note = _deterministic_clinical_note(
-                    doc.get("current_patient_age"),
-                    doc.get("current_patient_sex"),
-                    doc.get("age"),
-                    doc.get("sex"),
+                case.clinical_note = _deterministic_case_summary(
+                    doc.get("diagnosis"),
+                    doc.get("diagnosis_detail"),
+                    doc.get("prescription"),
+                    doc.get("concern"),
                 )
 
     return {

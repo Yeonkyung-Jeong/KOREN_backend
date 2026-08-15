@@ -62,4 +62,4 @@ def test_chat_response_envelope_rejects_unknown_type():
 def test_retrieve_patient_history_args_defaults():
     args = RetrievePatientHistoryArgs(scope="this_patient", query_text="브리핑 해줘")
     assert args.benign_malignant is None
-    assert args.top_k == 5
+    assert args.anatomy_site is None

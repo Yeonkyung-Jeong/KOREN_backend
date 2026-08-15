@@ -1,6 +1,6 @@
 from datetime import date
 
-from app.agent.nodes import _deterministic_clinical_note, context_organizer, fallback_answer
+from app.agent.nodes import _deterministic_case_summary, context_organizer, fallback_answer
 
 
 def test_context_organizer_formats_this_patient_timeline():
@@ -83,28 +83,34 @@ def test_fallback_answer_produces_valid_answer_response():
     assert result["messages"][0].content == result["final_response"]["answer_text"]
 
 
-def test_deterministic_clinical_note_flags_age_and_sex_differences():
-    note = _deterministic_clinical_note(60, "male", 41, "female")
-    assert "연령대" in note
-    assert "성별" in note
+def test_deterministic_case_summary_includes_diagnosis_concern_prescription():
+    note = _deterministic_case_summary(
+        "malignant", "melanoma", "광범위 절제술 시행", "전이 여부에 대한 불안"
+    )
+    assert note.startswith("melanoma 진단을 받았고")
+    assert "전이 여부에 대한 불안을 호소했고" in note
+    assert "광범위 절제술 시행을 처방받았습니다" in note
     assert "진행" not in note  # 의학적 인과관계(진행 속도 등) 단정 금지
     assert "예후" not in note
 
 
-def test_deterministic_clinical_note_flags_only_sex_difference():
-    note = _deterministic_clinical_note(60, "male", 60, "female")
-    assert "연령대" not in note
-    assert "성별" in note
+def test_deterministic_case_summary_falls_back_to_diagnosis_when_no_detail():
+    note = _deterministic_case_summary("benign", None, "경과 관찰", "특이 증상 없음")
+    assert note.startswith("benign 진단을 받았고")
 
 
-def test_deterministic_clinical_note_no_difference():
-    note = _deterministic_clinical_note(60, "male", 60, "male")
-    assert "유사한 사례" in note
+def test_deterministic_case_summary_handles_missing_concern_or_prescription():
+    note = _deterministic_case_summary("malignant", "melanoma", None, None)
+    assert note == "melanoma 진단을 받았습니다."
 
 
-def test_deterministic_clinical_note_handles_missing_data():
-    note = _deterministic_clinical_note(None, None, 41, "female")
-    assert "유사한 사례" in note
+def test_deterministic_case_summary_picks_batchim_aware_particle():
+    # "행"(받침 ㅇ 있음) -> 을, "소"(받침 없음) -> 를
+    with_final = _deterministic_case_summary("malignant", "melanoma", "즉시 조직검사 의뢰, 응급 전원 시행", None)
+    assert "시행을 처방받았습니다" in with_final
+
+    without_final = _deterministic_case_summary("malignant", "melanoma", None, "회복 여부에 대한 불안 호소")
+    assert "불안 호소를 호소했습니다" in without_final
 
 
 def test_fallback_answer_prefers_answer_grade_reasoning_when_grounding_failed():
