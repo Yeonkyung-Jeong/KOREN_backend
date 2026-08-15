@@ -25,7 +25,7 @@ MAIN_PATIENT = {
 
 MAIN_VISITS = [
     {
-        "date": datetime(2026, 3, 20),
+        "date": datetime(2026, 3, 20, 10, 30),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -36,7 +36,7 @@ MAIN_VISITS = [
         "진료계획": "1개월 후 재검",
     },
     {
-        "date": datetime(2026, 4, 20),
+        "date": datetime(2026, 4, 20, 14, 15),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -47,7 +47,7 @@ MAIN_VISITS = [
         "진료계획": "3개월 후 재검",
     },
     {
-        "date": datetime(2026, 7, 20),
+        "date": datetime(2026, 7, 20, 11, 0),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -76,7 +76,7 @@ COMPARISON_A_PATIENT = {
 
 COMPARISON_A_VISITS = [
     {
-        "date": datetime(2026, 5, 1),
+        "date": datetime(2026, 5, 1, 15, 45),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -87,7 +87,7 @@ COMPARISON_A_VISITS = [
         "진료계획": "1개월 후 재검",
     },
     {
-        "date": datetime(2026, 6, 5),
+        "date": datetime(2026, 6, 5, 10, 0),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -108,7 +108,7 @@ COMPARISON_B_PATIENT = {
 
 COMPARISON_B_VISITS = [
     {
-        "date": datetime(2026, 4, 1),
+        "date": datetime(2026, 4, 1, 13, 20),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -119,7 +119,7 @@ COMPARISON_B_VISITS = [
         "진료계획": "3개월 후 재검",
     },
     {
-        "date": datetime(2026, 7, 1),
+        "date": datetime(2026, 7, 1, 11, 40),
         "anatomy_site": models.AnatomySiteEnum.lower_extremity,
         "diagnosis": models.DiagnosisEnum.malignant,
         "diagnosis_detail": "melanoma",
@@ -138,7 +138,7 @@ SCENARIOS = [
 ]
 
 
-def seed_patient(session, patient_data: dict, visits: list, image_seq_start: int) -> int:
+def seed_patient(session, patient_data: dict, visits: list) -> None:
     existing = (
         session.query(models.Patient)
         .filter(models.Patient.patient_id == patient_data["patient_id"])
@@ -146,16 +146,16 @@ def seed_patient(session, patient_data: dict, visits: list, image_seq_start: int
     )
     if existing:
         print(f"[seed_showcase_scenarios] {patient_data['patient_id']} 이미 존재, 스킵")
-        return image_seq_start
+        return
 
     patient = models.Patient(**patient_data)
     session.add(patient)
     session.flush()  # patient.id 확보
 
-    image_seq = image_seq_start
-    for visit in visits:
-        image_name = f"SHOWCASE_{image_seq:04d}.jpg"
-        image_seq += 1
+    # 환자별로 스코프된 이름을 써서, 기존 환자가 스킵되더라도(전역 시퀀스가
+    # 진행되지 않는 상황) 다른 환자와 image_name이 충돌하지 않게 한다.
+    for index, visit in enumerate(visits, start=1):
+        image_name = f"SHOWCASE_{patient_data['patient_id']}_{index:02d}.jpg"
 
         medical_image = models.MedicalImage(
             image_name=image_name,
@@ -202,15 +202,13 @@ def seed_patient(session, patient_data: dict, visits: list, image_seq_start: int
         f"[seed_showcase_scenarios] {patient_data['patient_id']} 생성 완료 "
         f"(방문 {len(visits)}건)"
     )
-    return image_seq
 
 
 def seed():
     session = get_session()
     try:
-        image_seq = 1
         for patient_data, visits in SCENARIOS:
-            image_seq = seed_patient(session, patient_data, visits, image_seq)
+            seed_patient(session, patient_data, visits)
     finally:
         session.close()
 
