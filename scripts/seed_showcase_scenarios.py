@@ -14,8 +14,8 @@ from scripts._db import get_session
 # 동일 부위(lower_extremity)에 악성(melanoma) 진단이 3회 반복되지만, 매 방문마다
 # confidence_score가 낮아지고 처방이 "즉시 조직검사 -> 국소 처방 -> 경과 관찰
 # 전환"으로 완화되며, 환자 우려점도 "불안 호소 -> 다소 완화 -> 안심"으로 이어진다.
-# 방문 간격은 1차->2차 1개월, 2차->3차 3개월로 벌려, brief 응답의 recommendation이
-# "방문 간격이 벌어졌다"는 점을 근거로 다음 진료를 권고할 근거 데이터가 되게 한다.
+# 방문 간격은 1차->2차 1개월, 2차->3차 3개월로 벌려, narrative_summary가
+# "방문 간격이 벌어졌다"는 점을 구체적인 수치로 서술할 근거 데이터가 되게 한다.
 MAIN_PATIENT = {
     "patient_id": "IP_0000021",
     "name": "환자021",

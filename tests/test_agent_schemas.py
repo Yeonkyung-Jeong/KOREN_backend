@@ -26,7 +26,6 @@ def test_chat_response_envelope_discriminates_brief():
                     }
                 ],
                 "narrative_summary": "요약",
-                "recommendation": "권고",
             }
         }
     )

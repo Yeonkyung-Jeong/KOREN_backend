@@ -150,14 +150,12 @@ class BriefResponse(BaseModel):
         timeline: diagnosed_at 오름차순으로 정렬된 진단 이력 목록.
         narrative_summary: 방문 간격/처방/환자 반응 변화를 근거로 생성한
             서술형 요약.
-        recommendation: 방문 주기 등을 근거로 한 다음 진료 권고 문구.
     """
 
     type: Literal["brief"] = "brief"
     summary: BriefSummary = Field(description="전체 진단 건수/기간 요약")
     timeline: list[TimelineEntry] = Field(description="diagnosed_at 오름차순 진단 이력")
     narrative_summary: str = Field(description="방문 간격·처방·환자 반응 변화를 근거로 한 서술형 요약")
-    recommendation: str = Field(description="다음 진료에 대한 권고 문구")
 
 
 class SimilarCase(BaseModel):
